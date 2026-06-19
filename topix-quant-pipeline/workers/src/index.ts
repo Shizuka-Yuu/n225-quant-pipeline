@@ -192,6 +192,149 @@ export default {
         });
       }
 
+      // 4.1. POST /api/topix/calculate
+      // 未集計の日付について増分集計計算を実行する
+      if (path === "/api/topix/calculate" && request.method === "POST") {
+        // topix_prices に存在する日付のうち、topix_metrics に存在しない日付を昇順で取得
+        const datesRes = await env.DB.prepare(
+          `SELECT DISTINCT date FROM topix_prices 
+           WHERE date NOT IN (SELECT date FROM topix_metrics) 
+           ORDER BY date ASC`
+        ).all<{ date: string }>();
+
+        const targetDates = datesRes.results ? datesRes.results.map((r) => r.date) : [];
+        if (targetDates.length === 0) {
+          return new Response(JSON.stringify({ success: true, processed_count: 0, remaining_count: 0 }), {
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        // タイムアウトを防ぐため、1回のリクエストで最大10日分ずつ処理
+        const batchDates = targetDates.slice(0, 10);
+        const calculatedMetrics = [];
+
+        for (const targetDate of batchDates) {
+          // a. 指数の終値を取得
+          const indexPriceRes = await env.DB.prepare(
+            "SELECT close_price FROM topix_prices WHERE code = '^TPX' AND date = ?"
+          ).bind(targetDate).first<{ close_price: number }>();
+          const topixClose = indexPriceRes ? indexPriceRes.close_price : null;
+
+          // b. 当日の全個別銘柄の株価・出来高を取得
+          const currentPrices = await env.DB.prepare(
+            "SELECT code, close_price, volume FROM topix_prices WHERE code != '^TPX' AND date = ?"
+          ).bind(targetDate).all<{ code: string; close_price: number; volume: number }>();
+
+          if (!currentPrices.results || currentPrices.results.length === 0) continue;
+
+          // c. 前営業日の日付を特定し、その日の株価を取得
+          const prevDateRes = await env.DB.prepare(
+            "SELECT DISTINCT date FROM topix_prices WHERE date < ? ORDER BY date DESC LIMIT 1"
+          ).bind(targetDate).first<{ date: string }>();
+
+          const prevPricesMap = new Map<string, number>();
+          if (prevDateRes) {
+            const prevPrices = await env.DB.prepare(
+              "SELECT code, close_price FROM topix_prices WHERE code != '^TPX' AND date = ?"
+            ).bind(prevDateRes.date).all<{ code: string; close_price: number }>();
+            if (prevPrices.results) {
+              for (const p of prevPrices.results) {
+                prevPricesMap.set(p.code, p.close_price);
+              }
+            }
+          }
+
+          // d. 過去52週 (365日) の最高値・最安値を取得
+          const targetDateObj = new Date(targetDate);
+          const past365DateObj = new Date(targetDateObj.getTime() - 365 * 24 * 60 * 60 * 1000);
+          const past365DateStr = past365DateObj.toISOString().split("T")[0];
+
+          const rangePrices = await env.DB.prepare(
+            `SELECT code, MAX(close_price) as max_p, MIN(close_price) as min_p 
+             FROM topix_prices 
+             WHERE code != '^TPX' AND date >= ? AND date < ? 
+             GROUP BY code`
+          ).bind(past365DateStr, targetDate).all<{ code: string; max_p: number; min_p: number }>();
+
+          const maxPricesMap = new Map<string, number>();
+          const minPricesMap = new Map<string, number>();
+          if (rangePrices.results) {
+            for (const p of rangePrices.results) {
+              maxPricesMap.set(p.code, p.max_p);
+              minPricesMap.set(p.code, p.min_p);
+            }
+          }
+
+          // 集計
+          let advances = 0;
+          let declines = 0;
+          let unchanged = 0;
+          let newHighs = 0;
+          let newLows = 0;
+          let totalVolume = 0;
+
+          for (const p of currentPrices.results) {
+            totalVolume += p.volume;
+
+            // 前日比
+            if (prevPricesMap.has(p.code)) {
+              const prevClose = prevPricesMap.get(p.code)!;
+              if (p.close_price > prevClose) {
+                advances++;
+              } else if (p.close_price < prevClose) {
+                declines++;
+              } else {
+                unchanged++;
+              }
+            }
+
+            // 新高値・新安値
+            if (maxPricesMap.has(p.code)) {
+              const maxP = maxPricesMap.get(p.code)!;
+              const minP = minPricesMap.get(p.code)!;
+              if (p.close_price >= maxP) {
+                newHighs++;
+              }
+              if (p.close_price <= minP) {
+                newLows++;
+              }
+            }
+          }
+
+          calculatedMetrics.push({
+            date: targetDate,
+            topix_close: topixClose,
+            advances,
+            declines,
+            unchanged,
+            new_highs: newHighs,
+            new_lows: newLows,
+            total_volume: totalVolume
+          });
+        }
+
+        // 保存
+        if (calculatedMetrics.length > 0) {
+          const insertStmt = env.DB.prepare(
+            `INSERT OR REPLACE INTO topix_metrics 
+             (date, topix_close, advances, declines, unchanged, new_highs, new_lows, total_volume) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          );
+          const batchStmts = calculatedMetrics.map((m) =>
+            insertStmt.bind(m.date, m.topix_close, m.advances, m.declines, m.unchanged, m.new_highs, m.new_lows, m.total_volume)
+          );
+          await env.DB.batch(batchStmts);
+        }
+
+        return new Response(JSON.stringify({ 
+          success: true, 
+          processed_count: calculatedMetrics.length,
+          remaining_count: targetDates.length - calculatedMetrics.length
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       // 5. GET /api/topix/metrics
       // GAS向け日次集計データの返却
       if (path === "/api/topix/metrics" && request.method === "GET") {

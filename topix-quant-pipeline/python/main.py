@@ -349,9 +349,31 @@ def send_to_workers(endpoint, data):
             print(f"レスポンス: {res.text}")
         return False
 
-def calculate_metrics(prices):
-    """取得した株価データから、ローカルで値上がり・値下がり、新高値・新安値、総出来高を計算する"""
-    print("時系列データから TOPIX メトリクスの計算を開始します...")
+def trigger_calculation():
+    """Workersの増分集計計算処理を呼び出す (残り件数が 0 になるまでループ)"""
+    if not WORKERS_API_URL:
+        print("WORKERS_API_URL 未設定のため集計計算処理をスキップします。")
+        return
+        
+    url = f"{WORKERS_API_URL.rstrip('/')}/api/topix/calculate"
+    print("Workers の集計・計算処理をトリガーします...")
+    
+    while True:
+        try:
+            res = requests.post(url, headers=get_headers(auth=True))
+            res.raise_for_status()
+            data = res.json()
+            processed = data.get("processed_count", 0)
+            remaining = data.get("remaining_count", 0)
+            print(f"  集計結果: {processed} 日分処理完了 (残り {remaining} 日分)")
+            if remaining == 0 or processed == 0:
+                break
+            time.sleep(0.5) # ループ間の短いディレイ
+        except Exception as e:
+            print(f"集計処理のトリガーに失敗しました: {e}")
+            break
+
+def calculate_metrics_shadow(prices):
     from collections import defaultdict
     
     # 1. 銘柄ごとの株価リスト
@@ -585,10 +607,8 @@ def main():
         if not success:
             print("警告: チャンク送信中にエラーが発生しました。")
             
-    # 6. 指標計算の実行と送信
-    metrics_list = calculate_metrics(prices)
-    if metrics_list:
-        send_to_workers("/api/topix/metrics", metrics_list)
+    # 6. 指標計算の実行トリガー
+    trigger_calculation()
     
     print("=== TOPIX データ収集パイプライン終了 ===")
 
