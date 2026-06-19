@@ -43,7 +43,7 @@ function setup() {
 }
 
 /**
- * Workers API からデータを取得し、マクレランオシレーターを計算してスプレッドシートに追記するメイン関数
+ * Workers API からデータを取得し、マクレランオシレーターを計算してスプレッドシートに追記・更新するメイン関数
  */
 function syncN225Metrics() {
   var props = PropertiesService.getScriptProperties();
@@ -62,27 +62,29 @@ function syncN225Metrics() {
     throw new Error("シート '" + DEFAULT_SHEET_NAME + "' が見つかりません。先に setup 関数を実行してください。");
   }
 
-  // 1. スプレッドシート上の既存日付を特定 (A列)
+  // 1. スプレッドシート上の全既存データを取得
   var lastRow = sheet.getLastRow();
-  var existingDates = new Set();
+  var sheetData = [];
   var latestDateStr = "";
 
   if (lastRow > 1) {
-    // ヘッダーを除いた日付の範囲を取得 (A2:A{lastRow})
-    var dateValues = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    for (var i = 0; i < dateValues.length; i++) {
-      var d = dateValues[i][0];
-      if (d) {
-        var dateStr = formatDate(d);
-        existingDates.add(dateStr);
-        if (dateStr > latestDateStr) {
-          latestDateStr = dateStr;
-        }
+    sheetData = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+  }
+
+  // 日付をキーとして、sheetData上のインデックスをマップ化
+  var dateToIndexMap = {};
+  for (var i = 0; i < sheetData.length; i++) {
+    var d = sheetData[i][0];
+    if (d) {
+      var dateStr = formatDate(d);
+      dateToIndexMap[dateStr] = i;
+      if (dateStr > latestDateStr) {
+        latestDateStr = dateStr;
       }
     }
   }
   
-  Logger.log("スプレッドシートの既存データ件数: " + existingDates.size + ", 最新日付: " + (latestDateStr || "なし"));
+  Logger.log("スプレッドシートの既存データ件数: " + sheetData.length + ", 最新日付: " + (latestDateStr || "なし"));
 
   // 2. Workers から基礎集計データを取得
   var endpoint = workersUrl.replace(/\/$/, "") + "/api/metrics";
@@ -148,37 +150,45 @@ function syncN225Metrics() {
     });
   }
 
-  // 4. 重複を排除した新規追加用データの抽出
-  var newRows = [];
+  // 4. メモリ上でデータをマージ（既存日付は上書き、新規日付は追加）
+  var updateCount = 0;
+  var insertCount = 0;
+
   for (var k = 0; k < calculatedRows.length; k++) {
     var row = calculatedRows[k];
-    if (!existingDates.has(row.date)) {
-      newRows.push([
-        row.date,
-        row.nk225_close,
-        row.advances,
-        row.declines,
-        row.new_highs,
-        row.new_lows,
-        row.mcclellan_osc
-      ]);
+    var rowData = [
+      row.date,
+      row.nk225_close,
+      row.advances,
+      row.declines,
+      row.new_highs,
+      row.new_lows,
+      row.mcclellan_osc
+    ];
+
+    if (row.date in dateToIndexMap) {
+      var idx = dateToIndexMap[row.date];
+      sheetData[idx] = rowData;
+      updateCount++;
+    } else {
+      sheetData.push(rowData);
+      insertCount++;
     }
   }
 
-  Logger.log("追記対象の新規データ件数: " + newRows.length);
+  // 日付順にソート（新規追加分も含めて時系列順にする）
+  sheetData.sort(function(a, b) {
+    return a[0].localeCompare(b[0]);
+  });
 
-  // 5. 末尾への一括追記
-  if (newRows.length > 0) {
-    // 日付順にソートして追記
-    newRows.sort(function(a, b) {
-      return a[0].localeCompare(b[0]);
-    });
+  Logger.log("更新（上書き）データ件数: " + updateCount + ", 新規追加データ件数: " + insertCount);
 
-    var insertStartRow = lastRow + 1;
-    sheet.getRange(insertStartRow, 1, newRows.length, 7).setValues(newRows);
-    Logger.log("スプレッドシートに " + newRows.length + " 件のレコードを追記しました。");
+  // 5. スプレッドシートへ一括書き戻し
+  if (sheetData.length > 0) {
+    sheet.getRange(2, 1, sheetData.length, 7).setValues(sheetData);
+    Logger.log("スプレッドシートに合計 " + sheetData.length + " 件のレコードを書き込みました。");
   } else {
-    Logger.log("追記する新しいデータはありません。");
+    Logger.log("書き込むデータはありません。");
   }
 }
 
