@@ -349,20 +349,105 @@ def send_to_workers(endpoint, data):
             print(f"レスポンス: {res.text}")
         return False
 
-def trigger_calculation():
-    """Workersの集計計算処理を呼び出す"""
-    if not WORKERS_API_URL:
-        print("WORKERS_API_URL 未設定のため集計計算処理をスキップします。")
-        return
+def calculate_metrics(prices):
+    """取得した株価データから、ローカルで値上がり・値下がり、新高値・新安値、総出来高を計算する"""
+    print("時系列データから TOPIX メトリクスの計算を開始します...")
+    from collections import defaultdict
+    
+    # 1. 銘柄ごとの株価リスト
+    stock_data = defaultdict(list)
+    for p in prices:
+        stock_data[p["code"]].append(p)
         
-    url = f"{WORKERS_API_URL.rstrip('/')}/api/topix/calculate"
-    print("Workers の集計・計算処理をトリガーします...")
-    try:
-        res = requests.post(url, headers=get_headers(auth=True))
-        res.raise_for_status()
-        print(f"集計処理のトリガーに成功しました: {res.text}")
-    except Exception as e:
-        print(f"集計処理のトリガーに失敗しました: {e}")
+    # 日付でソート
+    for code in stock_data:
+        stock_data[code].sort(key=lambda x: x["date"])
+        
+    # 2. TOPIX指数の日程リスト
+    if "^TPX" not in stock_data:
+        print("警告: 指数データ (^TPX) が見つかりません。")
+        return []
+        
+    topix_prices = stock_data["^TPX"]
+    topix_dates = [p["date"] for p in topix_prices]
+    topix_close_map = {p["date"]: p["close_price"] for p in topix_prices}
+    
+    # 各銘柄の日付インデックスとデータのマップを作成 (高速化用)
+    stock_date_map = {}
+    for code, p_list in stock_data.items():
+        stock_date_map[code] = {
+            p["date"]: (idx, p["close_price"], p["volume"]) 
+            for idx, p in enumerate(p_list)
+        }
+        
+    metrics_list = []
+    
+    for d_idx, target_date in enumerate(topix_dates):
+        advances = 0
+        declines = 0
+        unchanged = 0
+        new_highs = 0
+        new_lows = 0
+        total_volume = 0
+        
+        # 52週 (365日) 前の日付文字列
+        target_dt = datetime.datetime.strptime(target_date, "%Y-%m-%d")
+        past_365_dt = target_dt - datetime.timedelta(days=365)
+        past_365_str = past_365_dt.strftime("%Y-%m-%d")
+        
+        for code, date_map in stock_date_map.items():
+            if code == "^TPX":
+                continue
+                
+            if target_date not in date_map:
+                continue
+                
+            idx, current_price, volume = date_map[target_date]
+            total_volume += volume
+            
+            # 前日比
+            p_list = stock_data[code]
+            if idx > 0:
+                prev_price = p_list[idx - 1]["close_price"]
+                if current_price > prev_price:
+                    advances += 1
+                elif current_price < prev_price:
+                    declines += 1
+                else:
+                    unchanged += 1
+                    
+            # 52週新高値・新安値
+            past_prices = []
+            lookback_idx = idx - 1
+            while lookback_idx >= 0:
+                p_prev = p_list[lookback_idx]
+                if p_prev["date"] < past_365_str:
+                    break
+                if p_prev["close_price"] is not None:
+                    past_prices.append(p_prev["close_price"])
+                lookback_idx -= 1
+                
+            if past_prices:
+                max_price = max(past_prices)
+                min_price = min(past_prices)
+                if current_price >= max_price:
+                    new_highs += 1
+                if current_price <= min_price:
+                    new_lows += 1
+                    
+        metrics_list.append({
+            "date": target_date,
+            "topix_close": topix_close_map.get(target_date),
+            "advances": advances,
+            "declines": declines,
+            "unchanged": unchanged,
+            "new_highs": new_highs,
+            "new_lows": new_lows,
+            "total_volume": total_volume
+        })
+        
+    print(f"メトリクス計算完了。計算日数: {len(metrics_list)}")
+    return metrics_list
 
 def main():
     print("=== TOPIX データ収集パイプライン開始 ===")
@@ -490,8 +575,10 @@ def main():
         if not success:
             print("警告: チャンク送信中にエラーが発生しました。")
             
-    # 6. 指標計算の実行トリガー
-    trigger_calculation()
+    # 6. 指標計算の実行と送信
+    metrics_list = calculate_metrics(prices)
+    if metrics_list:
+        send_to_workers("/api/topix/metrics", metrics_list)
     
     print("=== TOPIX データ収集パイプライン終了 ===")
 

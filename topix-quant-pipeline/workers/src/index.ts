@@ -141,72 +141,10 @@ export default {
         });
       }
 
-      // 4. POST /api/topix/calculate
-      // 日次指標計算の実行 (値上がり/値下がり/変わらず、52週新高値/新安値、全体出来高)
-      if (path === "/api/topix/calculate" && request.method === "POST") {
-        // D1から株価データを全件取得 (10,000行の上限を考慮しインクリメンタルにロード)
-        let allPrices: Array<{ code: string; date: string; close_price: number; volume: number }> = [];
-        let offset = 0;
-        const limit = 10000;
-
-        while (true) {
-          const res = await env.DB.prepare(
-            "SELECT code, date, close_price, volume FROM topix_prices ORDER BY code, date ASC LIMIT ? OFFSET ?"
-          )
-            .bind(limit, offset)
-            .all<{ code: string; date: string; close_price: number; volume: number }>();
-
-          if (!res.results || res.results.length === 0) {
-            break;
-          }
-          allPrices = allPrices.concat(res.results);
-          if (res.results.length < limit) {
-            break;
-          }
-          offset += limit;
-        }
-
-        if (allPrices.length === 0) {
-          return new Response(JSON.stringify({ error: "No price data in database" }), {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-
-        // データを銘柄コードごとにマップ化
-        const stockPricesMap = new Map<string, Array<{ date: string; close: number; volume: number }>>();
-        for (const row of allPrices) {
-          if (!stockPricesMap.has(row.code)) {
-            stockPricesMap.set(row.code, []);
-          }
-          stockPricesMap.get(row.code)!.push({
-            date: row.date,
-            close: row.close_price,
-            volume: row.volume,
-          });
-        }
-
-        // ソートの整合性を担保
-        for (const [code, arr] of stockPricesMap.entries()) {
-          arr.sort((a, b) => a.date.localeCompare(b.date));
-        }
-
-        // TOPIX指数のデータと日付リストの特定 (基準日はTOPIX指数 ^TPX の日付リストとする)
-        const topixPrices = stockPricesMap.get("^TPX") || [];
-        if (topixPrices.length === 0) {
-          return new Response(JSON.stringify({ error: "No TOPIX index data found (^TPX)" }), {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-
-        const topixCloseMap = new Map<string, number>();
-        for (const p of topixPrices) {
-          topixCloseMap.set(p.date, p.close);
-        }
-
-        const uniqueDates = topixPrices.map((p) => p.date);
-        const metricsToInsert: Array<{
+      // 4. POST /api/topix/metrics
+      // 集計済みデータの登録 (Python側で計算した結果を保存する)
+      if (path === "/api/topix/metrics" && request.method === "POST") {
+        const metrics = await request.json() as Array<{
           date: string;
           topix_close: number | null;
           advances: number;
@@ -215,95 +153,27 @@ export default {
           new_highs: number;
           new_lows: number;
           total_volume: number;
-        }> = [];
+        }>;
 
-        // 日付ごとに全銘柄の株価・出来高を集計計算
-        for (let dIdx = 0; dIdx < uniqueDates.length; dIdx++) {
-          const targetDate = uniqueDates[dIdx];
-
-          let advances = 0;
-          let declines = 0;
-          let unchanged = 0;
-          let newHighs = 0;
-          let newLows = 0;
-          let totalVolume = 0;
-
-          // 52週 (365日) 前の日付文字列を算出
-          const targetDateObj = new Date(targetDate);
-          const past365DateObj = new Date(targetDateObj.getTime() - 365 * 24 * 60 * 60 * 1000);
-          const past365DateStr = past365DateObj.toISOString().split("T")[0];
-
-          for (const [code, priceArr] of stockPricesMap.entries()) {
-            if (code === "^TPX") continue; // 指数自体は個別集計から除外
-
-            const idx = priceArr.findIndex((p) => p.date === targetDate);
-            if (idx === -1) continue; // 対象日にデータがない銘柄はスキップ
-
-            const currentPrice = priceArr[idx].close;
-            const currentVolume = priceArr[idx].volume;
-
-            // 出来高の加算
-            totalVolume += currentVolume;
-
-            // 1. 前日比比較（値上がり・値下がり・変わらず）
-            if (idx > 0) {
-              const prevPrice = priceArr[idx - 1].close;
-              if (currentPrice > prevPrice) {
-                advances++;
-              } else if (currentPrice < prevPrice) {
-                declines++;
-              } else {
-                unchanged++;
-              }
-            }
-
-            // 2. 52週新高値・新安値の計算
-            const pastPrices = priceArr.filter(
-              (p) => p.date >= past365DateStr && p.date < targetDate
-            );
-
-            if (pastPrices.length > 0) {
-              let maxPrice = -Infinity;
-              let minPrice = Infinity;
-
-              for (const p of pastPrices) {
-                if (p.close > maxPrice) maxPrice = p.close;
-                if (p.close < minPrice) minPrice = p.close;
-              }
-
-              if (currentPrice >= maxPrice) {
-                newHighs++;
-              }
-              if (currentPrice <= minPrice) {
-                newLows++;
-              }
-            }
-          }
-
-          metricsToInsert.push({
-            date: targetDate,
-            topix_close: topixCloseMap.get(targetDate) || null,
-            advances,
-            declines,
-            unchanged,
-            new_highs: newHighs,
-            new_lows: newLows,
-            total_volume: totalVolume,
+        if (!Array.isArray(metrics)) {
+          return new Response(JSON.stringify({ error: "Invalid data format" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
-        // 集計データを D1 の topix_metrics に保存
-        const insertStmt = env.DB.prepare(
+        const stmt = env.DB.prepare(
           `INSERT OR REPLACE INTO topix_metrics 
            (date, topix_close, advances, declines, unchanged, new_highs, new_lows, total_volume) 
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         );
 
+        // D1のバッチ制限を考慮して100件ずつバッチ実行
         const chunkSize = 100;
-        for (let i = 0; i < metricsToInsert.length; i += chunkSize) {
-          const chunk = metricsToInsert.slice(i, i + chunkSize);
+        for (let i = 0; i < metrics.length; i += chunkSize) {
+          const chunk = metrics.slice(i, i + chunkSize);
           const batchStmts = chunk.map((m) =>
-            insertStmt.bind(
+            stmt.bind(
               m.date,
               m.topix_close,
               m.advances,
@@ -317,10 +187,9 @@ export default {
           await env.DB.batch(batchStmts);
         }
 
-        return new Response(
-          JSON.stringify({ success: true, count: metricsToInsert.length }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return new Response(JSON.stringify({ success: true, count: metrics.length }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       // 5. GET /api/topix/metrics
