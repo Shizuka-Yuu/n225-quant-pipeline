@@ -1,0 +1,33 @@
+name: TOPIX Quant Pipeline
+
+on:
+  schedule:
+    # 毎日日本時間 16:40 (UTC 7:40) に実行 (日経225から少しずらして負荷分散)
+    - cron: '40 7 * * *'
+  workflow_dispatch: # 手動実行可能にする
+
+env:
+  TOPIX_WORKERS_API_URL: ${{ secrets.TOPIX_WORKERS_API_URL }}
+  TOPIX_WORKERS_API_TOKEN: ${{ secrets.TOPIX_WORKERS_API_TOKEN }}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r topix-quant-pipeline/python/requirements.txt
+
+      - name: Run Stock Ingestion Pipeline
+        run: |
+          python topix-quant-pipeline/python/main.py
