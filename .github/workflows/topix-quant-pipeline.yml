@@ -1,10 +1,7 @@
 name: TOPIX Quant Pipeline
 
 on:
-  schedule:
-    # 毎日日本時間 16:40 (UTC 7:40) に実行 (日経225から少しずらして負荷分散)
-    - cron: '40 7 * * *'
-  workflow_dispatch: # 手動実行可能にする
+  workflow_dispatch:
 
 env:
   TOPIX_WORKERS_API_URL: ${{ secrets.TOPIX_WORKERS_API_URL }}

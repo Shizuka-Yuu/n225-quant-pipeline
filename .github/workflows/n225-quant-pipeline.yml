@@ -1,10 +1,7 @@
 name: N225 Quant Pipeline
 
 on:
-  schedule:
-    # 毎日日本時間 16:30 (UTC 7:30) に実行
-    - cron: '30 7 * * *'
-  workflow_dispatch: # 手動実行可能にする
+  workflow_dispatch:
 
 env:
   WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
