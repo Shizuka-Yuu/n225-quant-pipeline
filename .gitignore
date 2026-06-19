@@ -1,0 +1,27 @@
+# Private directory
+private/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Cloudflare Wrangler
+.wrangler/
+dist/
+.dev.vars
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# OS-specific files
+.DS_Store
+Thumbs.db

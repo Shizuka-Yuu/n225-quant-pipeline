@@ -1,0 +1,33 @@
+name: N225 Quant Pipeline
+
+on:
+  schedule:
+    # 毎日日本時間 16:30 (UTC 7:30) に実行
+    - cron: '30 7 * * *'
+  workflow_dispatch: # 手動実行可能にする
+
+env:
+  WORKERS_API_URL: ${{ secrets.WORKERS_API_URL }}
+  WORKERS_API_TOKEN: ${{ secrets.WORKERS_API_TOKEN }}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r n225-quant-pipeline/python/requirements.txt
+
+      - name: Run Stock Ingestion Pipeline
+        run: |
+          python n225-quant-pipeline/python/main.py
