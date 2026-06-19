@@ -538,11 +538,21 @@ def main():
     # 4. 動的ETFスケーリング & シンボル変換 (1306 ➔ ^TPX)
     etf_records = [p for p in prices if p["code"] == "1306"]
     if etf_records:
+        # 1306.T は2026年4月1日に1:10の株式分割を行いました。
+        # Yahoo Financeの過去データが未調整（3000円台）のままになっているため、
+        # 権利落ち日（2026-03-30）より前の価格を10分の1に遡及調整します。
+        for p in prices:
+            if p["code"] == "1306" and p["date"] < "2026-03-30":
+                p["close_price"] = round(p["close_price"] / 10.0, 4)
+                
+        # 調整後の最新データから比率を計算
+        etf_records_updated = [p for p in prices if p["code"] == "1306"]
+        
         # 当日の本物のTOPIX現在値を日経からスクレイピング
         topix_real_close = fetch_nikkei_topix_close()
         
         # 1306の最新終値を取得して比率を算出
-        etf_records_sorted = sorted(etf_records, key=lambda x: x["date"])
+        etf_records_sorted = sorted(etf_records_updated, key=lambda x: x["date"])
         etf_latest_close = etf_records_sorted[-1]["close_price"]
         
         default_ratio = 9.41347  # TOPIX4044 / ETF429.7 ≒ 9.413
